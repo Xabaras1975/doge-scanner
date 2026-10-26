@@ -1,100 +1,108 @@
 import os
+import time
 import requests
 import numpy as np
-import pandas as pd
-from datetime import datetime
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Configurazione parametri
+INSTRUMENT = "DOGE_EUR"
+HOLDINGS = 186.49
+TIMEFRAME = "1h"
+PERIOD = 20
+STD_DEV_MULTIPLIER = 2.0
+CHECK_INTERVAL_SECONDS = 300  # Controllo ogni 5 minuti
+MAX_RUNTIME_SECONDS = 5 * 3600  # Gira per 5 ore consecutive
 
-DOGE_QUANTITA = 186.49
-VALUTA_TARGET = "DOGE_EUR"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def invia_telegram(messaggio):
+def send_telegram_alert(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[ERRORE] Credenziali Telegram non trovate nelle variabili d'ambiente.")
+        print("Credenziali Telegram non configurate.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": messaggio, "parse_mode": "HTML"}
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        print(f"Esito invio Telegram: {r.status_code}")
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            print("Alert Telegram inviato con successo.")
+        else:
+            print(f"Errore invio Telegram: {res.text}")
     except Exception as e:
-        print(f"Errore invio Telegram: {e}")
+        print(f"Eccezione Telegram: {e}")
 
-def fetch_crypto_com_ticker(symbol="DOGE_EUR"):
-    url = "https://api.crypto.com/v2/public/get-ticker"
-    params = {"instrument_name": symbol}
+def get_market_data():
+    url = f"https://api.crypto.com/v2/public/get-candlestick?instrument_name={INSTRUMENT}&timeframe={TIMEFRAME}"
     try:
-        res = requests.get(url, params=params, timeout=10).json()
-        if res.get("code") == 0:
-            data_raw = res["result"]["data"]
-            data = data_raw[0] if isinstance(data_raw, list) else data_raw
-            return float(data.get("a", 0)), float(data.get("b", 0)), float(data.get("k", 0))
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        if data.get("code") == 0 and "data" in data["result"]:
+            candlesticks = data["result"]["data"]
+            closes = [float(c["c"]) for c in candlesticks]
+            return closes
     except Exception as e:
-        print(f"Errore ticker: {e}")
-    return None, None, None
+        print(f"Errore scaricamento dati Crypto.com: {e}")
+    return None
 
-def fetch_crypto_candlesticks(symbol="DOGE_EUR", timeframe="1h"):
-    url = "https://api.crypto.com/v2/public/get-candlestick"
-    params = {"instrument_name": symbol, "timeframe": timeframe}
-    try:
-        res = requests.get(url, params=params, timeout=10).json()
-        if res.get("code") == 0:
-            data_raw = res["result"]["data"]
-            data_list = data_raw if isinstance(data_raw, list) else data_raw.get("data", [])
-            df = pd.DataFrame(data_list)
-            if not df.empty and 'c' in df.columns:
-                df['c'] = df['c'].astype(float)
-                return df['c'].values
-    except Exception as e:
-        print(f"Errore candele: {e}")
-    return np.array([])
+def analyze_and_notify(last_state):
+    closes = get_market_data()
+    if not closes or len(closes) < PERIOD:
+        print("Dati insufficienti o errore API.")
+        return last_state
 
-def analizza_doge():
-    ask, bid, last_price = fetch_crypto_com_ticker(VALUTA_TARGET)
-    closes = fetch_crypto_candlesticks(VALUTA_TARGET, timeframe="1h")
-    
-    if last_price is None or len(closes) < 20:
-        print("Dati di mercato non disponibili temporaneamente.")
-        return
+    current_price = closes[-1]
+    recent_closes = closes[-PERIOD:]
+    sma = np.mean(recent_closes)
+    std_dev = np.std(recent_closes)
 
-    valore_attuale_eur = round(DOGE_QUANTITA * last_price, 2)
-    finestra = closes[-20:]
-    media = np.mean(finestra)
-    std = np.std(finestra)
-    banda_superiore = media + (2.0 * std)
-    banda_inferiore = media - (2.0 * std)
-    deviazione_pct = round(((last_price - media) / media) * 100, 2)
+    upper_band = sma + (STD_DEV_MULTIPLIER * std_dev)
+    lower_band = sma - (STD_DEV_MULTIPLIER * std_dev)
+    dev_percent = ((current_price - sma) / sma) * 100
+    portfolio_val = current_price * HOLDINGS
 
-    print("=" * 60)
-    print("🐶 MONITOR QUANTITATIVO DOGE/EUR")
-    print(f"Prezzo Corrente: €{last_price:.5f} | Valore Saldo: €{valore_attuale_eur:.2f}")
-    print(f"Media (20h): €{media:.5f} | Deviazione: {deviazione_pct}%")
-    print(f"Soglia Sell (Banda Sup +2σ): €{banda_superiore:.5f}")
-    print(f"Soglia Buy  (Banda Inf -2σ): €{banda_inferiore:.5f}")
-    print("=" * 60)
+    print(f"[{time.strftime('%H:%M:%S')}] Prezzo: €{current_price:.5f} | Media: €{sma:.5f} | Range: [€{lower_band:.5f} - €{upper_band:.5f}]")
 
-    if last_price >= banda_superiore:
-        msg = (
-            f"🚀 <b>ALERT TARGET PROFITTO DOGE (+2σ)</b>\n\n"
-            f"Prezzo Attuale: <code>€{last_price:.5f}</code>\n"
-            f"Controvalore Saldo: <b>€{valore_attuale_eur:.2f}</b>\n"
-            f"Deviazione dalla media: <b>+{deviazione_pct}%</b>\n\n"
-            f"💡 <i>Picco statistico: momento per prendere profitto.</i>"
-        )
-        invia_telegram(msg)
-    elif last_price <= banda_inferiore:
-        msg = (
-            f"📉 <b>ALERT ACCUMULO DOGE (-2σ)</b>\n\n"
-            f"Prezzo Attuale: <code>€{last_price:.5f}</code>\n"
-            f"Controvalore Saldo: <b>€{valore_attuale_eur:.2f}</b>\n"
-            f"Deviazione dalla media: <b>{deviazione_pct}%</b>\n\n"
-            f"💡 <i>Ipervenduto statistico: momento per accumulare.</i>"
-        )
-        invia_telegram(msg)
-    else:
-        print("Prezzo all'interno del canale ordinario. Nessun alert inviato.")
+    current_state = "NORMAL"
+
+    if current_price >= upper_band:
+        current_state = "OVERBOUGHT"
+        if last_state != "OVERBOUGHT":
+            msg = (
+                f"🚀 *ALERT TARGET PROFITTO DOGE (+2σ)*\n\n"
+                f"Prezzo Attuale: `€{current_price:.5f}`\n"
+                f"Controvalore Saldo: *€{portfolio_val:.2f}*\n"
+                f"Deviazione dalla media: *+{dev_percent:.2f}%*\n\n"
+                f"💡 _Picco statistico: momento per prendere profitto._"
+            )
+            send_telegram_alert(msg)
+
+    elif current_price <= lower_band:
+        current_state = "OVERSOLD"
+        if last_state != "OVERSOLD":
+            msg = (
+                f"📉 *ALERT ACCUMULO DOGE (-2σ)*\n\n"
+                f"Prezzo Attuale: `€{current_price:.5f}`\n"
+                f"Controvalore Saldo: *€{portfolio_val:.2f}*\n"
+                f"Deviazione dalla media: *{dev_percent:.2f}%*\n\n"
+                f"💡 _Ipervenduto statistico: momento per accumulare._"
+            )
+            send_telegram_alert(msg)
+
+    return current_state
+
+def main():
+    print(f"Avvio monitoraggio continuo DOGE (Controllo ogni {CHECK_INTERVAL_SECONDS // 60} minuti)...")
+    start_time = time.time()
+    last_state = "NORMAL"
+
+    while (time.time() - start_time) < MAX_RUNTIME_SECONDS:
+        last_state = analyze_and_notify(last_state)
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+    print("Finestra di 5 ore completata. Riavvio al ciclo successivo.")
 
 if __name__ == "__main__":
-    analizza_doge()
+    main()
