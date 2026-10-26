@@ -2,8 +2,8 @@ name: Monitor DOGE H24
 
 on:
   schedule:
-    # Esegue il controllo ogni 15 minuti
-    - cron: '*/15 * * * *'
+    # Esegue il riavvio del processo ogni 5 ore
+    - cron: '0 */5 * * *'
   workflow_dispatch:
 
 jobs:
