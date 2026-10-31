@@ -1,16 +1,22 @@
 import os
 import time
+import json
 import requests
 import numpy as np
+from datetime import datetime
 
-# Configurazione parametri
+# ================= CONFIGURAZIONE =================
 INSTRUMENT = "DOGE_EUR"
 HOLDINGS = 186.49
 TIMEFRAME = "1h"
 PERIOD = 20
 STD_DEV_MULTIPLIER = 2.0
-CHECK_INTERVAL_SECONDS = 300  # Controllo ogni 5 minuti
-MAX_RUNTIME_SECONDS = 5 * 3600  # Gira per 5 ore consecutive
+CHECK_INTERVAL_SECONDS = 300     # Controllo ogni 5 minuti
+MAX_RUNTIME_SECONDS = 5 * 3600    # 5 ore per sessione
+MEMORY_FILE = "doge_memory.json"
+
+# Prezzo di riferimento pre-crollo (29 Ottobre ore 00:00)
+PREZZO_BASE_PRE_CROLLO = 0.07280 
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -34,6 +40,27 @@ def send_telegram_alert(message: str):
     except Exception as e:
         print(f"Eccezione Telegram: {e}")
 
+def carica_memoria():
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, "r") as f:
+                dati = json.load(f)
+                return dati
+        except Exception:
+            pass
+    return {
+        "prezzo_originale": PREZZO_BASE_PRE_CROLLO,
+        "data_avvio": "2026-10-29 00:00",
+        "last_state": "NORMAL"
+    }
+
+def salva_memoria(dati):
+    try:
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(dati, f, indent=4)
+    except Exception as e:
+        print(f"Errore salvataggio memoria: {e}")
+
 def get_market_data():
     url = f"https://api.crypto.com/v2/public/get-candlestick?instrument_name={INSTRUMENT}&timeframe={TIMEFRAME}"
     try:
@@ -47,11 +74,11 @@ def get_market_data():
         print(f"Errore scaricamento dati Crypto.com: {e}")
     return None
 
-def analyze_and_notify(last_state):
+def analyze_and_notify(memoria):
     closes = get_market_data()
     if not closes or len(closes) < PERIOD:
         print("Dati insufficienti o errore API.")
-        return last_state
+        return memoria
 
     current_price = closes[-1]
     recent_closes = closes[-PERIOD:]
@@ -63,7 +90,17 @@ def analyze_and_notify(last_state):
     dev_percent = ((current_price - sma) / sma) * 100
     portfolio_val = current_price * HOLDINGS
 
-    print(f"[{time.strftime('%H:%M:%S')}] Prezzo: €{current_price:.5f} | Media: €{sma:.5f} | Range: [€{lower_band:.5f} - €{upper_band:.5f}]")
+    prezzo_base = memoria.get("prezzo_originale", PREZZO_BASE_PRE_CROLLO)
+    last_state = memoria.get("last_state", "NORMAL")
+
+    diff_pre_crollo = ((current_price - prezzo_base) / prezzo_base) * 100
+    segno_diff = "+" if diff_pre_crollo >= 0 else ""
+
+    print(
+        f"[{time.strftime('%H:%M:%S')}] Prezzo: €{current_price:.5f} | "
+        f"Vs Pre-Crollo (€{prezzo_base:.5f}): {segno_diff}{diff_pre_crollo:.2f}% | "
+        f"Controvalore: €{portfolio_val:.2f}"
+    )
 
     current_state = "NORMAL"
 
@@ -72,9 +109,11 @@ def analyze_and_notify(last_state):
         if last_state != "OVERBOUGHT":
             msg = (
                 f"🚀 *ALERT TARGET PROFITTO DOGE (+2σ)*\n\n"
-                f"Prezzo Attuale: `€{current_price:.5f}`\n"
-                f"Controvalore Saldo: *€{portfolio_val:.2f}*\n"
-                f"Deviazione dalla media: *+{dev_percent:.2f}%*\n\n"
+                f"• Prezzo Attuale: `€{current_price:.5f}`\n"
+                f"• Livello Pre-Crollo: `€{prezzo_base:.5f}`\n"
+                f"• Variazione dal Pre-Crollo: *{segno_diff}{diff_pre_crollo:.2f}%*\n"
+                f"• Controvalore ({HOLDINGS} DOGE): *€{portfolio_val:.2f}*\n"
+                f"• Deviazione Bollinger: *+{dev_percent:.2f}%*\n\n"
                 f"💡 _Picco statistico: momento per prendere profitto._"
             )
             send_telegram_alert(msg)
@@ -84,25 +123,32 @@ def analyze_and_notify(last_state):
         if last_state != "OVERSOLD":
             msg = (
                 f"📉 *ALERT ACCUMULO DOGE (-2σ)*\n\n"
-                f"Prezzo Attuale: `€{current_price:.5f}`\n"
-                f"Controvalore Saldo: *€{portfolio_val:.2f}*\n"
-                f"Deviazione dalla media: *{dev_percent:.2f}%*\n\n"
+                f"• Prezzo Attuale: `€{current_price:.5f}`\n"
+                f"• Livello Pre-Crollo: `€{prezzo_base:.5f}`\n"
+                f"• Variazione dal Pre-Crollo: *{segno_diff}{diff_pre_crollo:.2f}%*\n"
+                f"• Controvalore ({HOLDINGS} DOGE): *€{portfolio_val:.2f}*\n"
+                f"• Deviazione Bollinger: *{dev_percent:.2f}%*\n\n"
                 f"💡 _Ipervenduto statistico: momento per accumulare._"
             )
             send_telegram_alert(msg)
 
-    return current_state
+    memoria["last_price"] = current_price
+    memoria["last_state"] = current_state
+    memoria["ultimo_aggiornamento"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    salva_memoria(memoria)
+
+    return memoria
 
 def main():
-    print(f"Avvio monitoraggio continuo DOGE (Controllo ogni {CHECK_INTERVAL_SECONDS // 60} minuti)...")
+    print(f"Avvio monitoraggio DOGE rispetto al pre-crollo (€{PREZZO_BASE_PRE_CROLLO:.5f})...")
+    memoria = carica_memoria()
     start_time = time.time()
-    last_state = "NORMAL"
 
     while (time.time() - start_time) < MAX_RUNTIME_SECONDS:
-        last_state = analyze_and_notify(last_state)
+        memoria = analyze_and_notify(memoria)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
-    print("Finestra di 5 ore completata. Riavvio al ciclo successivo.")
+    print("Ciclo di 5 ore completato.")
 
 if __name__ == "__main__":
     main()
